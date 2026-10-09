@@ -8,6 +8,8 @@ import * as vscode from "vscode";
 import { getServerSpec } from "./api/getServerSpec";
 import { AUTHENTICATION_PROVIDER } from "./authenticationProvider";
 import { getAccountFromParts } from "./commonActivate";
+import { logger } from "./logger";
+import { IServerSetting } from "./serverSetting";
 
 export interface IServerSession {
 	serverName: string;
@@ -93,9 +95,11 @@ export async function makeRESTRequest(
 		if (cookies.length > 0 || !server.auth.username) {
 			request.headers.Cookie = cookies.join("; ");
 			respdata = await axios.request(request);
-			if (respdata?.status === 401) {
+			if (respdata.status === 401) {
 				delete request.headers.Cookie;
 				respdata = undefined;
+			} else if (respdata.status < 300 && cookies.length === 0) {
+				rememberUnknownUser(server.name);
 			}
 		}
 		// Make the request w/ credentials
@@ -175,6 +179,31 @@ export async function logout(serverName: string) {
 	} catch { }
 }
 
+async function rememberUnknownUser(name: string): Promise<void> {
+	const inspect = (scope?: vscode.ConfigurationScope) =>
+		vscode.workspace.getConfiguration("intersystems", scope).inspect<Record<string, IServerSetting>>("servers");
+	const candidates: Array<{ scope?: vscode.ConfigurationScope; servers?: Record<string, IServerSetting>; target: vscode.ConfigurationTarget }> = [
+		...(vscode.workspace.workspaceFolders ?? []).map((scope) =>
+			({ scope, servers: inspect(scope)?.workspaceFolderValue, target: vscode.ConfigurationTarget.WorkspaceFolder })),
+		{ servers: inspect()?.workspaceValue, target: vscode.ConfigurationTarget.Workspace },
+		{ servers: inspect()?.globalValue, target: vscode.ConfigurationTarget.Global },
+	];
+	const found = candidates.find(({ servers }) => servers?.[name]);
+	const setting = found?.servers?.[name];
+	if (!found || !setting || setting.username || setting.oauth2) {
+		return;
+	}
+	try {
+		await vscode.workspace.getConfiguration("intersystems", found.scope)
+			.update("servers", { ...found.servers, [name]: { ...setting, username: "UnknownUser" } }, found.target);
+		vscode.window.showInformationMessage(
+			`Server '${name}' allowed unauthenticated access, so its 'username' setting has been set to 'UnknownUser'. A future release will prompt for a username whenever none is set.`,
+		);
+	} catch (error) {
+		logger?.warn(`Failed to set username of '${name}' to UnknownUser: ${error}`);
+	}
+}
+
 async function resolveCredentials(spec: IServerSpec & { auth: Authorization }): Promise<void> {
 	// This arises if setting says to use authentication provider
 	if (!spec.auth.resolved()) {
@@ -192,10 +221,10 @@ async function resolveCredentials(spec: IServerSpec & { auth: Authorization }): 
 				{ createIfNone: true, account },
 			);
 		}
-		if (session && session.accessToken) {
+		if (session) {
 			spec.auth.resolve({
 				accessToken: session.accessToken,
-				username: session.scopes[1].toLowerCase() === "unknownuser" ? "" : session.scopes[1],
+				username: session.scopes[1],
 			});
 		}
 	}

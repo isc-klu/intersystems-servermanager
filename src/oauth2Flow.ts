@@ -47,14 +47,15 @@ function tokenSetFromResponse(label: string, data: any): IOAuth2TokenSet | undef
  * Perform an OAuth2 Authorization Code + PKCE flow: open the browser for login,
  * listen for the callback, exchange the code for an access token (and refresh token if issued).
  */
-export async function performOAuth2Login(label: string, config: IOAuth2Config): Promise<IOAuth2TokenSet | undefined> {
+/** Returns the token set from an interactive login. Throws if discovery, the login, or the token exchange fails, or the login is cancelled or times out. */
+export async function performOAuth2Login(label: string, config: IOAuth2Config): Promise<IOAuth2TokenSet> {
 	logger?.info(`OAuth2 [${label}]: starting interactive login`);
 	const codeVerifier = generateCodeVerifier();
 	const codeChallenge = await generateCodeChallenge(codeVerifier);
 	const state = generateRandomHex(32); // CSRF protection
 
 	const endpoints = await discoverEndpoints(label, config.authority);
-	if (!endpoints) { return undefined; }
+	if (!endpoints) { throw new Error("OAuth2: Failed to discover endpoints"); }
 	const { authorizationEndpoint, tokenEndpoint } = endpoints;
 
 	const callbackUri = vscode.Uri.parse(`${vscode.env.uriScheme}://intersystems-community.servermanager/oauth2-callback`);
@@ -105,7 +106,7 @@ export async function performOAuth2Login(label: string, config: IOAuth2Config): 
 	await vscode.env.openExternal(vscode.Uri.parse(authUrl.toString()));
 
 	const code = await codePromise;
-	if (!code) { return undefined; }
+	if (!code) { throw new Error("OAuth2: Login was cancelled or timed out"); }
 
 	try {
 		const tokenResponse = await axios.post(tokenEndpoint, new URLSearchParams({
@@ -118,15 +119,12 @@ export async function performOAuth2Login(label: string, config: IOAuth2Config): 
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		});
 		const tokenSet = tokenSetFromResponse(label, tokenResponse.data);
-		if (!tokenSet) {
-			vscode.window.showErrorMessage("OAuth2: No access token in response", "Dismiss");
-		}
+		if (!tokenSet) { throw new Error("OAuth2: No access token in response"); }
 		return tokenSet;
 	} catch (err: any) {
 		const detail = err.response?.data?.error_description || err.message;
 		logger?.error(`OAuth2 [${label}]: token exchange failed - ${detail}`);
-		vscode.window.showErrorMessage(`OAuth2: Token exchange failed - ${detail}`, "Dismiss");
-		return undefined;
+		throw new Error(`OAuth2: Token exchange failed - ${detail}`);
 	}
 }
 

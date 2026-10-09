@@ -108,9 +108,8 @@ export interface Authorization {
 
 /** Narrowed `Authorization` known to hold usable credentials, per `resolved()`. */
 export interface ResolvedAuthorization extends Authorization {
-	get accessToken(): string;
-	get httpAuthorizationHeader(): string;
-	get credentials(): { auth?: { username: string; password: string }; headers?: Record<string, string> };
+	get accessToken(): NonNullable<Authorization["accessToken"]>;
+	get credentials(): NonNullable<Authorization["credentials"]>;
 }
 
 export interface ServerForUri {

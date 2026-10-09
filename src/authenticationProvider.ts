@@ -120,36 +120,29 @@ export class ServerManagerAuthenticationProvider implements AuthenticationProvid
 		await this._ensureInitialized();
 		const serverName = scopes[0] || await this.promptServerName();
 		const spec = await getServerSpec(serverName);
-		const userName = scopes[1] || spec?.auth.username || await this.promptUserName(serverName);
-		// Return existing session if found
-		const sessionId = ServerManagerAuthenticationProvider.sessionId(serverName, userName);
+		const auth = spec?.auth.clone() ?? new BasicAuthorization();
+		auth.resolve({ username: scopes[1] || auth.username || await this.promptUserName(serverName) });
+		const sessionId = ServerManagerAuthenticationProvider.sessionId(serverName, auth.username);
 		const existingSession = await this.findExistingSession(sessionId);
 		if (existingSession !== undefined) {
 			return existingSession;
 		}
-		let auth: Authorization;
-		if (spec?.auth.resolved()) {
-			auth = spec.auth;
-		} else {
+		if (!auth.resolved()) {
 			const credentialKey = ServerManagerAuthenticationProvider.credentialKey(sessionId);
 			let accessToken = await this.secretStorage.get(credentialKey);
 			if (accessToken === undefined) {
-				if (spec?.auth instanceof OAuth2Authorization) {
-					const tokenSet = await performOAuth2Login(sessionId, ServerManagerAuthenticationProvider.oauth2Config(spec));
-					accessToken = tokenSet?.accessToken;
-					if (accessToken) {
-						await this.secretStorage.store(credentialKey, accessToken);
-						await this._storeOAuth2Secret(sessionId, tokenSet);
-						logger?.info(`OAuth2 [${sessionId}]: login complete, ${tokenSet?.refreshToken ? "refresh token stored" : "no refresh token"}`);
-					}
+				if (auth instanceof OAuth2Authorization) {
+					// spec is certainly defined because an OAuth2Authorization must originate from spec.
+					const tokenSet = await performOAuth2Login(sessionId, ServerManagerAuthenticationProvider.oauth2Config({ ...spec!, auth }));
+					accessToken = tokenSet.accessToken;
+					await this.secretStorage.store(credentialKey, accessToken);
+					await this._storeOAuth2Secret(sessionId, tokenSet);
+					logger?.info(`OAuth2 [${sessionId}]: login complete, ${tokenSet.refreshToken ? "refresh token stored" : "no refresh token"}`);
 				} else {
-					// Password is "" if userName is ""
-					accessToken = userName && await this.promptPassword(userName, serverName, credentialKey);
+					accessToken = await this.promptPassword(auth.username, serverName, credentialKey);
 				}
-
 			}
-			auth = spec?.auth.clone() ?? new BasicAuthorization();
-			auth.resolve({ username: userName || "UnknownUser", accessToken });
+			auth.resolve({ accessToken });
 		}
 		if (auth.resolved()) {
 			return this._finalizeSession(serverName, auth);
@@ -225,8 +218,8 @@ export class ServerManagerAuthenticationProvider implements AuthenticationProvid
 		return serverName;
 	}
 
+	/** Returns the entered username, or UnknownUser if left blank to request unauthenticated access. Throws if the prompt is dismissed. */
 	private async promptUserName(serverName: string): Promise<string> {
-		// Prompt for the username.
 		const enteredUserName = await window.showInputBox({
 			ignoreFocusOut: true,
 			placeHolder: `Username on server '${serverName}'`,
@@ -236,7 +229,7 @@ export class ServerManagerAuthenticationProvider implements AuthenticationProvid
 		if (enteredUserName === undefined) {
 			throw new Error(`${AUTHENTICATION_PROVIDER_LABEL}: Username is required.`);
 		}
-		return enteredUserName;
+		return enteredUserName || "UnknownUser";
 	}
 
 	private async findExistingSession(sessionId: string): Promise<AuthenticationSession | undefined> {
@@ -254,6 +247,7 @@ export class ServerManagerAuthenticationProvider implements AuthenticationProvid
 		}
 	}
 
+	/** Returns a non-empty password. Throws if the prompt is dismissed or left blank. */
 	private async promptPassword(userName: string, serverName: string, credentialKey: string): Promise<string> {
 		const doInputBox = async (): Promise<string | undefined> => {
 			return await new Promise<string | undefined>((resolve, reject) => {
